@@ -1,5 +1,6 @@
 import express from 'express';
 import Order from '../models/Order.js';
+import Product from '../models/Product.js';
 import { protect, adminOnly } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -9,7 +10,23 @@ router.post('/', protect, async (req, res, next) => {
     const { items, totalPrice } = req.body;
     if (!items?.length) return res.status(400).json({ message: 'Order must contain at least one item' });
 
-    const order = await Order.create({ user: req.user._id, items, totalPrice });
+    const ids = items.map(item => item.product);
+    const products = await Product.find({ _id: { $in: ids } });
+    const productMap = new Map(products.map(product => [String(product._id), product]));
+
+    const orderItems = items.map(item => {
+      const product = productMap.get(String(item.product));
+      if (!product) throw new Error('One or more products no longer exist');
+      const quantity = Number(item.quantity);
+      if (!Number.isInteger(quantity) || quantity < 1) throw new Error('Invalid product quantity');
+      if (product.stock < quantity) throw new Error(`${product.name} does not have enough stock`);
+      return { product: product._id, name: product.name, price: product.price, quantity };
+    });
+
+    const calculatedTotal = orderItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    const order = await Order.create({ user: req.user._id, items: orderItems, totalPrice: calculatedTotal });
+
+    await Promise.all(orderItems.map(item => Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.quantity } })));
     res.status(201).json(order);
   } catch (error) { next(error); }
 });
